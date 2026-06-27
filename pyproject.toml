@@ -12,6 +12,9 @@ dependencies = [
     "cryptography==49.0.0",
     "pydantic-settings==2.14.2",
     "redis==5.2.1",
+    "celery==5.5.3",
+    "gevent==25.9.1",
+    "httpx==0.28.1",
 ]
 
 [dependency-groups]
@@ -44,7 +47,7 @@ files = ["app", "tests"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["pywa.*"]
+module = ["pywa.*", "celery.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

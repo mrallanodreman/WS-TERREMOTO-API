@@ -103,6 +103,12 @@ def setup_handlers(wa: WhatsApp) -> None:
 > conversación y responde con `msg.reply_text(service.handle_text(...))`. El *qué hacemos*
 > no vive en el handler sino en el motor y en cada **feature**.
 
+> **Procesamiento asíncrono (Celery):** el endpoint **no** procesa en el request: valida
+> firma + tenant (rápido), **encola** el mensaje en la bandeja FIFO de la conversación y
+> dispara un task (`webhook/tasks.py`); el trabajo pesado (build_client + handlers + reply
+> + bound) corre en un **worker Celery** aparte. Así la ingesta nunca es cuello de botella
+> y se escala con N workers, **manteniendo el orden** de los mensajes por usuario. Ver §11.
+
 ### Enviar mensajes
 
 Siempre por pywa (`msg.reply_text(...)`, `client.send_message(...)`). **No** armar
@@ -154,7 +160,9 @@ Un módulo solo consume de otro su superficie pública: `services`, `enums`, `ex
 - Todo entra por `app/core/config.py::Settings` y se lee con `get_settings()`.
 - Variables actuales (las dos primeras **idénticas** a `ws-backend`):
   `WHATSAPP_APP_SECRET`, `ENCRYPTION_SECRET_KEY`, `WEBHOOK_ADD_MESSAGE_ENDPOINT`,
-  `REDIS_URL` (estado de conversación; ver §10).
+  `REDIS_URL` (estado de conversación; ver §10),
+  `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` (cola del worker; ver §11; caen a
+  `REDIS_URL` si no se definen).
 - `.env` **nunca** se commitea (está en `.gitignore`); se versiona `.env.example`.
 - Variable nueva = se declara y tipa en `Settings`, se documenta en `.env.example`.
 
@@ -200,15 +208,29 @@ export $(grep -v '^#' .env | xargs) ; .venv/bin/python3 -m uvicorn app.main:app 
 # producción local (gunicorn + workers uvicorn)
 export $(grep -v '^#' .env | xargs) ; .venv/bin/gunicorn app.main:app -c gunicorn.conf.py
 
-# docker (usa gunicorn)
+# workers de Celery (procesan lo encolado; ver §11). Local, sin Docker:
+export $(grep -v '^#' .env | xargs) ; .venv/bin/celery -A app.core.celery_app worker \
+  --pool=gevent --concurrency=200 --queues=fast --prefetch-multiplier=1
+export $(grep -v '^#' .env | xargs) ; .venv/bin/celery -A app.core.celery_app worker \
+  --pool=prefork --concurrency=2 --queues=heavy --prefetch-multiplier=1
+
+# docker (api + redis + worker-fast + worker-heavy)
 docker compose up -d --build
+docker compose up -d --scale worker-fast=N   # más throughput en la cola rápida
 ```
 
-- En contenedor corre con **gunicorn** (`gunicorn.conf.py`); la concurrencia la dan
-  los `WORKERS` (pywa es síncrono/bloqueante).
-- **Deploy:** Dokploy propio, tipo Application/Dockerfile, puerto `8000`, las 3 env
-  vars, dominio con HTTPS y healthcheck `/ms/ws/health`. URL del webhook resultante:
-  `https://<dominio>/ms/ws/webhook`.
+- Una **sola imagen** sirve para los 3 roles vía `entrypoint.sh` (`ROLE=web|fast|heavy`).
+  La api solo encola (no es el límite); el throughput de procesamiento = replicas ×
+  `--concurrency` de cada worker.
+- **Pools:** `fast` usa **gevent** (I/O-bound, concurrency alta); `heavy` usa **prefork**
+  (CPU-bound, concurrency ≈ cores). Una tarea CPU en gevent congelaría el proceso → por eso
+  van en colas separadas.
+- **Deploy (Dokploy):** **tres** apps que comparten el mismo Dockerfile y Redis, cambiando
+  solo `ROLE`: (1) **web** (puerto `8000`, healthcheck `/ms/ws/health`, dominio HTTPS),
+  (2) **worker-fast**, (3) **worker-heavy** (los dos sin puerto ni healthcheck HTTP). Todas
+  con las env vars (incluidas las de Celery). URL del webhook: `https://<dominio>/ms/ws/webhook`.
+- **Redis:** persistencia AOF; el broker (DB 1) **sin** `maxmemory`/eviction (no perder
+  tareas encoladas). Ver `docker-compose.yml`.
 
 > **Prefijo del microservicio:** todas las rutas cuelgan de `/ms/ws/`, definido en
 > `app/api/router.py` (`APIRouter(prefix="/ms/ws")`). Un endpoint nuevo se declara
@@ -293,3 +315,76 @@ feature toque `client`/`outgoing`.
 > texto numérico (todas las salidas son `type: text`, lo que mantiene intacto el bound de
 > `outgoing.py`); es migrable a lista interactiva (`SectionList` + `on_callback_selection`)
 > sin cambiar el contrato `Feature`.
+
+---
+
+## 11. Procesamiento asíncrono con Celery (workers)
+
+El webhook **no procesa en el request**. El endpoint valida firma + tenant (rápido) y
+**encola** el trabajo; un **worker Celery aparte** lo ejecuta. Esto evita que la ingesta
+sea un cuello de botella y permite escalar a muchos mensajes / features lentas (de ms a
+minutos) agregando workers.
+
+```
+POST /ms/ws/webhook
+  ├─ verify_signature + resolve_tenant         (~15ms; permite 401/403 reales)
+  ├─ mensaje de usuario → RPUSH a la bandeja FIFO de la conversación (orden de llegada)
+  │                       + process_conversation.apply_async(queue=fast|heavy)
+  │                         (la cola la decide el feature activo; ver "Colas fast/heavy")
+  ├─ evento sin mensaje (status/delivery) → process_event (queue=fast, sin lock)
+  └─ 200 "ok" inmediato                         ← la cola Redis absorbe los picos
+
+[worker-fast: gevent · worker-heavy: prefork]
+  process_conversation(conv_key):
+    ├─ lock Redis NO bloqueante por conversación
+    │    └─ si está tomado → return (otro worker ya drena ESA conversación; el msg está en la bandeja)
+    ├─ while body := LPOP(bandeja):  _run_pywa(body)   ← drena EN ORDEN FIFO, un msg tras otro
+    ├─ release del lock (finally)
+    └─ has_pending? → re-encola (cierra la ventana entre el último pop y el release)
+```
+
+### Colas fast/heavy (mezcla de features I/O y CPU)
+Dos colas con pools distintos para que una feature pesada no frene las rápidas:
+- **`fast`** — pool **gevent**, alta concurrency: features I/O-bound (menú, búsquedas que
+  esperan APIs). Miles en paralelo por core sin bloquear.
+- **`heavy`** — pool **prefork**, concurrency ≈ cores: features CPU-bound (una tarea CPU en
+  gevent congelaría todo el proceso, por eso van aparte).
+
+**Routing:** un feature declara `queue = Queue.HEAVY` (`conversation/enums.py`); si no
+declara, va a `fast`. `WebhookService._queue_for` lee el feature activo del estado y enruta
+el drenado a la cola correcta. El feature que aún no tiene estado (entrar desde el menú)
+corre en `fast` (su `start()` es liviano); los turnos siguientes ya van a `heavy`.
+
+### Por qué bandeja FIFO y no solo lock
+El bot es una **máquina de estados por pasos**: el orden de los mensajes de un usuario
+importa. Un lock simple da exclusión mutua pero **no orden** (los reintentos compiten). La
+**bandeja FIFO** (lista Redis por conversación) garantiza que los mensajes de un mismo
+usuario se procesen **en orden de llegada**, drenados por un solo worker, sin esperas de
+reintento. Conversaciones distintas corren en paralelo sin tocarse.
+
+### Piezas
+
+- `app/core/celery_app.py` — instancia `celery_app` (infra; **no** importa de `modules`).
+  `broker`/`backend` desde `get_settings()`. `worker_prefetch_multiplier=1` (un task a la
+  vez por proceso → reparto justo con tareas largas), `task_time_limit=600`.
+- `app/modules/webhook/tasks.py` — `process_conversation` (drena la bandeja con lock) y
+  `process_event` (eventos sin estado, directo). Importa `outgoing` para **activar el
+  monkeypatch del bound en el worker** (el worker no carga `main.py`).
+- `app/modules/webhook/conversation/inbox.py` — bandeja FIFO + lock: `push_message`,
+  `pop_message`, `has_pending`, `conversation_lock`, `extract_sender_wa_id`.
+- `entrypoint.sh` — una sola imagen, `ROLE=web|fast|heavy` arranca gunicorn o el worker de
+  la cola correspondiente (con su pool y concurrency).
+
+### Reglas
+
+1. **Toda salida sigue siendo por pywa** (§2): el bound se mantiene intacto en el worker.
+2. **Sin autoretry sobre excepciones de negocio** (evita reenviar mensajes de WhatsApp). El
+   orden se garantiza por la bandeja, no por reintentos.
+3. **El RPUSH va en `services.enqueue` (en el request)**, en orden de llegada HTTP; el task
+   solo drena. Así el orden FIFO se fija en la ingesta.
+4. **El motor conversacional (`conversation/service.py`, `handlers.py`) no sabe de Celery**:
+   la bandeja y el encolado viven en `inbox.py`/`tasks.py`/`services.py`. Un feature nuevo
+   (§10) no toca nada de esto.
+5. **Escala:** subir `--concurrency` y/o replicas del worker. Si aparecen features muy
+   pesadas, separarlas en una cola `heavy` propia vía `task_routes` (el contrato `Feature`
+   no cambia).

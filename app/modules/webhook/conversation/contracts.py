@@ -29,6 +29,9 @@ class Feature(Protocol):
     key: str
     label: str
     order: int
+    # Cola de Celery opcional: un feature CPU-pesado declara `queue = Queue.HEAVY`
+    # para que su procesamiento no bloquee las interacciones rápidas. Si no se
+    # declara, el motor lo enruta a la cola `fast` (ver §11 de CLAUDE.md).
 
     def start(self) -> FeatureReply:
         """Devuelve el primer mensaje al entrar al feature."""

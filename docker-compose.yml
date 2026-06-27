@@ -1,17 +1,28 @@
+# Topología afinada para un VPS de 4 vCPU / 7.6 GB (ver §11 de CLAUDE.md).
+# Misma imagen para los 3 roles; cambia ROLE (web|fast|heavy) en entrypoint.sh.
+x-app: &app
+  build: .
+  image: ws-terremoto-api
+  env_file:
+    - .env
+  environment: &app-env
+    REDIS_URL: redis://redis:6379/0
+    CELERY_BROKER_URL: redis://redis:6379/1
+    CELERY_RESULT_BACKEND: redis://redis:6379/2
+  restart: unless-stopped
+  depends_on:
+    - redis
+
 services:
   api:
-    build: .
-    image: ws-terremoto-api
+    <<: *app
     container_name: ws-terremoto-api
-    env_file:
-      - .env
     environment:
-      REDIS_URL: redis://redis:6379/0
+      <<: *app-env
+      ROLE: web
+      WORKERS: "4"          # 4 vCPU: ingesta + verificación de firma/credenciales
     ports:
       - "8001:8000"
-    restart: unless-stopped
-    depends_on:
-      - redis
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ms/ws/health')"]
       interval: 30s
@@ -19,10 +30,32 @@ services:
       retries: 3
       start_period: 5s
 
+  worker-fast:
+    <<: *app
+    environment:
+      <<: *app-env
+      ROLE: fast
+      FAST_CONCURRENCY: "200"   # gevent: features I/O-bound en paralelo (bajo CPU)
+    # escala con: docker compose up -d --scale worker-fast=N
+
+  worker-heavy:
+    <<: *app
+    environment:
+      <<: *app-env
+      ROLE: heavy
+      HEAVY_CONCURRENCY: "2"    # prefork: ~2 cores reservados para features CPU-bound
+
   redis:
     image: redis:7-alpine
     container_name: ws-terremoto-redis
     restart: unless-stopped
+    # appendonly: durabilidad de la cola. maxmemory solo sobre el estado (DB 0);
+    # el broker (DB 1) NO debe expulsar claves o se perderían tareas encoladas.
+    command: >
+      redis-server
+      --appendonly yes
+      --save ""
+      --maxmemory-policy noeviction
     volumes:
       - redis-data:/data
 
