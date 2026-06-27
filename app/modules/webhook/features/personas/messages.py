@@ -10,6 +10,7 @@ SERVICE_UNAVAILABLE = (
     "Inténtalo de nuevo en unos minutos."
 )
 RESULTS_HEADER = "Esto fue lo que encontré:"
+MORE_RESULTS = "_…y {count} coincidencia(s) más. Escribe un nombre más específico para acotar._"
 STATUS_SAFE = "✅ A salvo"
 STATUS_NEEDS_HELP = "🆘 Necesita ayuda"
 STATUS_LOOKING_FOR_SOMEONE = "🔴 Reportada como desaparecida"

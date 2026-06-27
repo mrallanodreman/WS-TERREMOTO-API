@@ -135,6 +135,28 @@ def test_render_people_no_results():
     assert render_people([]) == messages.NO_RESULTS
 
 
+def test_render_people_stays_under_whatsapp_limit_and_caps():
+    many = [
+        to_person_dto(
+            {"id": str(i), "name": f"Persona {i}", "status": "SAFE",
+             "place_name": "Refugio", "message": "x" * 500, "source": "s"}
+        )
+        for i in range(94)
+    ]
+    text = render_people(many)
+    assert len(text) <= 4096
+    assert "más" in text  # avisa que hubo coincidencias omitidas
+
+
+def test_render_people_truncates_long_message():
+    dto = to_person_dto(
+        {"id": "1", "name": "Ana", "status": "SAFE", "message": "y" * 500}
+    )
+    text = render_people([dto])
+    assert "…" in text
+    assert "y" * 500 not in text
+
+
 # ── Feature ───────────────────────────────────────────────────────────────────
 
 def test_feature_handle_renders_results():
