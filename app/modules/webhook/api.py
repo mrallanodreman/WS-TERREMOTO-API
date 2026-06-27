@@ -46,14 +46,14 @@ def health() -> dict[str, str]:
 
 @router.post("/webhook")
 async def webhook(request: Request) -> Response:
-    """Recibe el forward firmado de ws-backend y dispara el echo vía pywa."""
+    """Verifica el forward firmado de ws-backend y encola su procesamiento."""
     body = await request.body()
     try:
-        content, status_code = WebhookService().process(
+        WebhookService().enqueue(
             body,
             request.headers.get("X-Hub-Signature-256"),
             request.headers.get("Authorization"),
         )
     except WebhookError as exc:
         raise _as_http_error(exc) from None
-    return Response(content=content, status_code=status_code, media_type="text/plain")
+    return Response(content="ok", status_code=status.HTTP_200_OK, media_type="text/plain")

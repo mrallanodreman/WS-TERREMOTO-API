@@ -6,3 +6,6 @@ pywa==4.2.0
 cryptography==49.0.0
 pydantic-settings==2.14.2
 redis==5.2.1
+celery==5.5.3
+gevent==25.9.1
+httpx==0.28.1
