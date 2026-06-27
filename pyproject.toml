@@ -11,6 +11,7 @@ dependencies = [
     "pywa==4.2.0",
     "cryptography==49.0.0",
     "pydantic-settings==2.14.2",
+    "redis==5.2.1",
 ]
 
 [dependency-groups]
@@ -57,6 +58,9 @@ implicit_reexport = true
 testpaths = ["tests"]
 addopts = "--cov=app --cov-report=term-missing --cov-fail-under=80"
 
+[tool.coverage.run]
+omit = ["app/modules/webhook/features/_template/*"]
+
 [tool.importlinter]
 root_packages = ["app"]
 
@@ -64,3 +68,12 @@ root_packages = ["app"]
 name = "Capas: api -> modules -> core"
 type = "layers"
 layers = ["app.api", "app.modules", "app.core"]
+
+[[tool.importlinter.contracts]]
+name = "Los features no tocan client/outgoing"
+type = "forbidden"
+source_modules = ["app.modules.webhook.features"]
+forbidden_modules = [
+    "app.modules.webhook.client",
+    "app.modules.webhook.outgoing",
+]

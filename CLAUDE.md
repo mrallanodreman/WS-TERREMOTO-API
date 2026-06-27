@@ -32,18 +32,30 @@ app/
 ├── core/                      # infra compartida, NO dominio
 │   ├── config.py              # Settings (pydantic-settings) — único lector de .env
 │   ├── security.py            # firma del forward + descifrado de credenciales
+│   ├── redis.py               # get_redis() — cliente Redis crudo (infra, sin dominio)
 │   └── errors.py              # contrato de error único + handlers + request_id
 ├── modules/
 │   └── webhook/               # módulo de dominio (8 archivos estándar)
 │       ├── api.py             # endpoints; traduce excepción de dominio → HTTP
 │       ├── services.py        # lógica (no sabe de HTTP)
 │       ├── client.py          # construye el WhatsApp (pywa) del tenant
-│       ├── handlers.py        # @wa.on_message / @wa.on_callback_button → delega a services
+│       ├── handlers.py        # @wa.on_message → delega en ConversationService
 │       ├── outgoing.py        # patch GraphAPI.send_message → bound a ws-backend
 │       ├── schemas.py         # DTOs (pydantic)
 │       ├── enums.py           # valores cerrados (StrEnum)
 │       ├── exceptions.py      # excepciones de dominio
-│       └── messages.py        # mensajes de error (inglés, centralizados)
+│       ├── messages.py        # mensajes de error HTTP (inglés, centralizados)
+│       ├── conversation/      # motor del bot de menú (ver §10)
+│       │   ├── contracts.py   # Protocol Feature + FeatureTurn/FeatureReply
+│       │   ├── service.py     # dispatcher: menú ↔ feature, carga/persiste estado
+│       │   ├── store.py       # ConversationStore (Redis + InMemory) por (tenant,user)
+│       │   ├── registry.py    # autodescubrimiento de features
+│       │   ├── schemas.py     # ConversationState + conversation_key()
+│       │   ├── enums.py       # comandos globales (menú/0/salir)
+│       │   └── messages.py    # copy del menú hacia el usuario (ESPAÑOL)
+│       └── features/          # las opciones del menú (1 carpeta = 1 feature)
+│           ├── personas/      # feature de referencia (repo→mapper→presenter)
+│           └── _template/     # plantilla para nuevos features (el `_` la ignora)
 ├── api/router.py              # ensambla los routers
 └── main.py                    # crea la app, middleware, handlers de error, routers
 ```
@@ -86,9 +98,10 @@ def setup_handlers(wa: WhatsApp) -> None:
         WebhookService().handle_button(cb)
 ```
 
-> Hoy `setup_echo` hace el echo inline porque es trivial (una línea). En cuanto la
-> respuesta deje de ser un echo, se renombra a `setup_handlers` y el handler pasa a
-> **delegar en `WebhookService`** en vez de responder directo.
+> El handler real (`setup_handlers`) ya **delega en `ConversationService`** (el motor del
+> bot de menú, §10): extrae `tenant.phone_id` + `msg.from_user.wa_id`, arma la clave de
+> conversación y responde con `msg.reply_text(service.handle_text(...))`. El *qué hacemos*
+> no vive en el handler sino en el motor y en cada **feature**.
 
 ### Enviar mensajes
 
@@ -140,7 +153,8 @@ Un módulo solo consume de otro su superficie pública: `services`, `enums`, `ex
 
 - Todo entra por `app/core/config.py::Settings` y se lee con `get_settings()`.
 - Variables actuales (las dos primeras **idénticas** a `ws-backend`):
-  `WHATSAPP_APP_SECRET`, `ENCRYPTION_SECRET_KEY`, `WEBHOOK_ADD_MESSAGE_ENDPOINT`.
+  `WHATSAPP_APP_SECRET`, `ENCRYPTION_SECRET_KEY`, `WEBHOOK_ADD_MESSAGE_ENDPOINT`,
+  `REDIS_URL` (estado de conversación; ver §10).
 - `.env` **nunca** se commitea (está en `.gitignore`); se versiona `.env.example`.
 - Variable nueva = se declara y tipa en `Settings`, se documenta en `.env.example`.
 
@@ -206,3 +220,76 @@ docker compose up -d --build
 
 Conventional Commits: `feat(webhook): …`, `fix(webhook): …`, `chore: …`.
 Una migración/cambio coherente por PR. No mergear lógica duplicada (§0, regla de tres).
+
+---
+
+## 10. Crear un feature de menú (el bot lineal)
+
+El bot ya no hace echo: presenta un **menú** ("1) Búsqueda de personas, 2) …") y cada
+opción es un **feature**. Un feature **no es un módulo de dominio HTTP** (§3): no tiene
+`api.py`, router ni excepciones HTTP. Es una carpeta autocontenida en
+`app/modules/webhook/features/<feature>/` que implementa el `Protocol` `Feature`.
+
+### Cómo funciona el motor (`webhook/conversation/`)
+
+```
+WhatsApp → handler → ConversationService.handle_text(key, text)
+  key = conversation_key(tenant.phone_id, msg.from_user.wa_id)
+  1. comando global (menú/menu/0/salir) → limpia estado → muestra menú
+  2. sin feature activo → interpreta el texto como nº de opción → feature.start()
+  3. con feature activo → feature.handle(turn) → si done, vuelve al menú
+```
+
+- **Estado en Redis** (`ConversationStore`, TTL 30 min deslizante), keyed por
+  `(tenant phone_id, user wa_id)`. Es **obligatorio externo**: `build_client` reconstruye
+  el cliente pywa en cada request y hay varios workers, así que la memoria del proceso (y
+  los *listeners* nativos de pywa) **no sirven**.
+- El cliente Redis crudo es **infra** → `core/redis.py::get_redis()`. El `ConversationStore`
+  (serializa `ConversationState`, dominio) vive en `conversation/store.py` (modules→core).
+
+### El contrato (`conversation/contracts.py`)
+
+```python
+class MiFeature:
+    key = "mi_feature"          # único y estable (snake_case); NO cambiarlo luego
+    label = "Texto en el menú"
+    order = 2                   # posición; desempate alfabético por key
+
+    def start(self) -> FeatureReply:                 # primer mensaje al entrar
+        return FeatureReply(text="...", step="paso_1")
+
+    def handle(self, turn: FeatureTurn) -> FeatureReply:   # cada respuesta del usuario
+        ...                                          # done=True → vuelve al menú
+```
+
+`FeatureTurn{text, step, data}` entra; `FeatureReply{text, step, data, done}` sale. El motor
+solo persiste `feature/step/data`; flujos multi-paso leen `turn.step` y acumulan en
+`turn.data`. Los comandos globales (volver al menú) los maneja el motor: gratis.
+
+### Capa de datos: `repository → mapper → presenter` (regla de tres aplicada)
+
+- `repository.py`: una clase **por fuente** (API/DB) con `search(query) -> list[DTO]` que
+  devuelve **DTOs ya normalizados**. Fuentes heterogéneas = varias clases repo; el feature
+  concatena sus DTOs y el `presenter` no sabe de fuentes.
+- `mapper.py`: traduce el registro crudo de la fuente → DTO de dominio (`schemas.py`).
+- `presenter.py`: DTOs → texto de WhatsApp.
+- `messages.py` del feature: **copy hacia el usuario, en español** (≠ los `messages.py` de
+  error HTTP, que van en inglés, §4). `enums.py`: valores cerrados (`StrEnum`).
+
+### Registro = cero archivos compartidos
+
+El feature se **autodescubre**: basta que su `__init__.py` exponga `FEATURE = MiFeature()`.
+No se edita ninguna lista ni router → **PRs en paralelo sin conflictos de merge**. Las
+carpetas con prefijo `_` (como `_template`) se ignoran.
+
+### Plantilla y guía
+
+Copia `features/_template/` → `features/<tu_feature>/`, renómbrala y sigue su `README.md`.
+Todo feature entra con sus tests (`repository`/`mapper`/`presenter`; ver `tests/test_personas.py`)
+y debe pasar los 4 gates (§7). El contrato `forbidden` de import-linter impide que un
+feature toque `client`/`outgoing`.
+
+> **pywa:** consultar siempre la doc oficial — https://pywa.readthedocs.io/. El menú hoy es
+> texto numérico (todas las salidas son `type: text`, lo que mantiene intacto el bound de
+> `outgoing.py`); es migrable a lista interactiva (`SectionList` + `on_callback_selection`)
+> sin cambiar el contrato `Feature`.

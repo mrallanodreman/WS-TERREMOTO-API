@@ -43,7 +43,7 @@ def test_health(client):
     assert client.get("/ms/ws/health").json() == {"status": "healthy"}
 
 
-def test_echo_and_bound(client, capture_send, encrypt_credentials, sign, text_webhook_body):
+def test_menu_and_bound(client, capture_send, encrypt_credentials, sign, text_webhook_body):
     creds = {**TENANT, "_exp": time.time() + 1800}
     headers = {
         "X-Hub-Signature-256": sign(text_webhook_body),
@@ -54,7 +54,7 @@ def test_echo_and_bound(client, capture_send, encrypt_credentials, sign, text_we
     assert r.status_code == 200
     assert capture_send["sent"]["sender"] == TENANT["phone_id"]
     assert capture_send["sent"]["to"] == "584140000000"
-    assert capture_send["sent"]["msg"]["body"] == "hola"
+    assert "Búsqueda de personas" in capture_send["sent"]["msg"]["body"]
     assert capture_send["bound"]["data"]["wamid"] == "wamid.OUT_ECHO"
     assert capture_send["bound"]["url"].endswith("/api/messages/add")
 

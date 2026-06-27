@@ -5,12 +5,26 @@ services:
     container_name: ws-terremoto-api
     env_file:
       - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "8001:8000"
     restart: unless-stopped
+    depends_on:
+      - redis
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ms/ws/health')"]
       interval: 30s
       timeout: 3s
       retries: 3
       start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    container_name: ws-terremoto-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:
