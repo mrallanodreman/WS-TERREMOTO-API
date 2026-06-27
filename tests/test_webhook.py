@@ -40,7 +40,7 @@ def capture_send(monkeypatch):
 
 
 def test_health(client):
-    assert client.get("/health").json() == {"status": "healthy"}
+    assert client.get("/ms/ws/health").json() == {"status": "healthy"}
 
 
 def test_echo_and_bound(client, capture_send, encrypt_credentials, sign, text_webhook_body):
@@ -49,7 +49,7 @@ def test_echo_and_bound(client, capture_send, encrypt_credentials, sign, text_we
         "X-Hub-Signature-256": sign(text_webhook_body),
         "Authorization": encrypt_credentials(creds),
     }
-    r = client.post("/webhook", content=text_webhook_body, headers=headers)
+    r = client.post("/ms/ws/webhook", content=text_webhook_body, headers=headers)
 
     assert r.status_code == 200
     assert capture_send["sent"]["sender"] == TENANT["phone_id"]
@@ -64,7 +64,7 @@ def test_invalid_signature(client, encrypt_credentials, text_webhook_body):
         "X-Hub-Signature-256": "sha256=deadbeef",
         "Authorization": encrypt_credentials({**TENANT, "_exp": time.time() + 1800}),
     }
-    r = client.post("/webhook", content=text_webhook_body, headers=headers)
+    r = client.post("/ms/ws/webhook", content=text_webhook_body, headers=headers)
     assert r.status_code == 403
     assert r.json()["error"]["code"] == "INVALID_SIGNATURE"
     assert r.json()["error"]["request_id"]
@@ -72,13 +72,13 @@ def test_invalid_signature(client, encrypt_credentials, text_webhook_body):
 
 def test_missing_credentials(client, sign, text_webhook_body):
     headers = {"X-Hub-Signature-256": sign(text_webhook_body)}
-    r = client.post("/webhook", content=text_webhook_body, headers=headers)
+    r = client.post("/ms/ws/webhook", content=text_webhook_body, headers=headers)
     assert r.status_code == 401
     assert r.json()["error"]["code"] == "MISSING_CREDENTIALS"
 
 
 def test_invalid_credentials(client, sign, text_webhook_body):
     headers = {"X-Hub-Signature-256": sign(text_webhook_body), "Authorization": "no-es-fernet"}
-    r = client.post("/webhook", content=text_webhook_body, headers=headers)
+    r = client.post("/ms/ws/webhook", content=text_webhook_body, headers=headers)
     assert r.status_code == 401
     assert r.json()["error"]["code"] == "INVALID_CREDENTIALS"

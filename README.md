@@ -38,7 +38,7 @@ WS-TERREMOTO-API/
 ## Flujo
 
 ```
-Meta ──► ws-backend ──(forward firmado)──► POST /webhook
+Meta ──► ws-backend ──(forward firmado)──► POST /ms/ws/webhook
                                               │ verify_signature (X-Hub-Signature-256)
                                               │ resolve_tenant   (Authorization cifrado)
                                               │ build_client     (pywa, credenciales del tenant)
@@ -83,7 +83,9 @@ docker compose logs -f        # ver logs
 docker compose down           # bajar
 ```
 
-El servicio expone `8001` (host) → `8000` (contenedor) y trae healthcheck sobre `/health`.
+El servicio expone `8001` (host) → `8000` (contenedor) y trae healthcheck sobre `/ms/ws/health`.
+
+> **Todas las rutas viven bajo el prefijo `/ms/ws/`** → `/ms/ws/webhook` y `/ms/ws/health`.
 
 ## Servidor (gunicorn)
 
