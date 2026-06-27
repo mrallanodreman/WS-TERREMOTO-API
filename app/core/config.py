@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     whatsapp_app_secret: str = ""
     encryption_secret_key: str = ""
     webhook_add_message_endpoint: str = ""
+    redis_url: str = "redis://localhost:6379/0"
 
 
 @lru_cache

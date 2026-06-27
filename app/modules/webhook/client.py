@@ -3,12 +3,12 @@
 from pywa import WhatsApp
 
 from app.core.config import get_settings
-from app.modules.webhook.handlers import setup_echo
+from app.modules.webhook.handlers import setup_handlers
 from app.modules.webhook.schemas import Tenant
 
 
 def build_client(tenant: Tenant) -> WhatsApp:
-    """Construye el cliente pywa del tenant y registra el handler de echo.
+    """Construye el cliente pywa del tenant y registra el motor conversacional.
 
     Args:
         tenant: Credenciales (phone_id, token) del tenant del forward.
@@ -22,5 +22,5 @@ def build_client(tenant: Tenant) -> WhatsApp:
         token=tenant.token,
         app_secret=get_settings().whatsapp_app_secret,
     )
-    setup_echo(client)
+    setup_handlers(client, tenant)
     return client
