@@ -6,13 +6,14 @@ from app.modules.webhook.conversation.service import ConversationService
 from app.modules.webhook.conversation.store import InMemoryConversationStore
 from app.modules.webhook.features.personas import messages as personas_messages
 from app.modules.webhook.features.personas.feature import PersonasFeature
+from app.modules.webhook.features.personas.repository import StubPersonRepository
 
 KEY = "conv:phone:user"
 
 
 @pytest.fixture
 def service():
-    feature = PersonasFeature()
+    feature = PersonasFeature(repositories=(StubPersonRepository(),))
     return ConversationService(InMemoryConversationStore(), {feature.key: feature})
 
 
