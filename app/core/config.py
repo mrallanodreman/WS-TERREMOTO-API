@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     reports_api_timeout_seconds: float = 10.0
     reports_api_page_limit: int = 200
     reports_api_max_pages: int = 5
+    edge_marketing_ingest_url: str = ""
 
     @property
     def celery_broker(self) -> str:
