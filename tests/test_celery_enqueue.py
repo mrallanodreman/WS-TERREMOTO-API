@@ -8,7 +8,11 @@ from app.modules.webhook import services as svc
 from app.modules.webhook.conversation import inbox
 from app.modules.webhook.conversation.schemas import ConversationState, conversation_key
 from app.modules.webhook.services import WebhookService
-from app.modules.webhook.tasks import process_conversation, process_event
+from app.modules.webhook.tasks import (
+    forward_edge_update,
+    process_conversation,
+    process_event,
+)
 
 TENANT = {"phone_id": "123456789012345", "token": "EAAG_tenant"}
 WA_ID = "584140000000"
@@ -28,6 +32,12 @@ def test_endpoint_pushes_to_inbox_and_enqueues_drain(
         "apply_async",
         lambda args, queue: captured.update(args=args, queue=queue),
     )
+    forwarded: dict = {}
+    monkeypatch.setattr(
+        forward_edge_update,
+        "apply_async",
+        lambda args, queue: forwarded.update(args=args, queue=queue),
+    )
     headers = {
         "X-Hub-Signature-256": sign(text_webhook_body),
         "Authorization": encrypt_credentials({**TENANT, "_exp": time.time() + 1800}),
@@ -40,6 +50,12 @@ def test_endpoint_pushes_to_inbox_and_enqueues_drain(
     assert captured["args"] == [conv_key, TENANT["phone_id"], TENANT["token"]]
     assert captured["queue"] == "fast"  # sin feature activo → cola rápida
     assert inbox.has_pending(conv_key) is True  # quedó en la bandeja
+    assert forwarded["args"] == [
+        text_webhook_body.decode("utf-8"),
+        TENANT["phone_id"],
+        TENANT["token"],
+    ]
+    assert forwarded["queue"] == "fast"
 
 
 def test_invalid_signature_does_not_enqueue(
