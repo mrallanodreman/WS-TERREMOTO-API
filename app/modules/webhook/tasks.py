@@ -46,3 +46,19 @@ def process_conversation(conv_key: str, phone_id: str, token: str) -> None:
 def process_event(body: str, phone_id: str, token: str) -> None:
     """Procesa un evento sin estado (status/delivery): sin lock ni orden."""
     _run_pywa(body, phone_id, token)
+
+
+@celery_app.task(  # type: ignore[untyped-decorator]
+    name="app.modules.webhook.tasks.forward_edge_update",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 3},
+)
+def forward_edge_update(body: str, phone_id: str, token: str) -> None:
+    """Reenvía el update fuera del request HTTP y con reintentos acotados."""
+    from app.modules.webhook.forward import forward_to_edge_marketing
+
+    forward_to_edge_marketing(
+        body.encode("utf-8"),
+        Tenant(phone_id=phone_id, token=token),
+    )
