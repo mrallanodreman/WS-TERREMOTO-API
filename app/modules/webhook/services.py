@@ -1,8 +1,9 @@
 """Lógica de dominio del webhook (no sabe de HTTP)."""
 
+import logging
+
 from app.core.security import decrypt_credentials, is_valid_signature
 from app.modules.webhook.conversation import inbox
-from app.modules.webhook.forward import forward_to_edge_marketing
 from app.modules.webhook.conversation.enums import Queue
 from app.modules.webhook.conversation.registry import discover_features
 from app.modules.webhook.conversation.schemas import conversation_key
@@ -13,7 +14,13 @@ from app.modules.webhook.exceptions import (
     MissingCredentialsError,
 )
 from app.modules.webhook.schemas import Tenant
-from app.modules.webhook.tasks import process_conversation, process_event
+from app.modules.webhook.tasks import (
+    forward_edge_update,
+    process_conversation,
+    process_event,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class WebhookService:
@@ -69,7 +76,7 @@ class WebhookService:
             process_event.apply_async(
                 args=[payload, tenant.phone_id, tenant.token], queue=Queue.FAST
             )
-            forward_to_edge_marketing(body, tenant)
+            self._enqueue_forward(payload, tenant)
             return
         conv_key = conversation_key(tenant.phone_id, wa_id)
         inbox.push_message(conv_key, payload)
@@ -77,7 +84,18 @@ class WebhookService:
             args=[conv_key, tenant.phone_id, tenant.token],
             queue=self._queue_for(conv_key),
         )
-        forward_to_edge_marketing(body, tenant)
+        self._enqueue_forward(payload, tenant)
+
+    @staticmethod
+    def _enqueue_forward(payload: str, tenant: Tenant) -> None:
+        """Encola el forward opcional sin añadir I/O al request principal."""
+        try:
+            forward_edge_update.apply_async(
+                args=[payload, tenant.phone_id, tenant.token],
+                queue=Queue.FAST,
+            )
+        except Exception:
+            logger.exception("Could not enqueue optional Edge Marketing forward")
 
     def _queue_for(self, conv_key: str) -> str:
         """Elige la cola según el peso del feature activo en la conversación.
