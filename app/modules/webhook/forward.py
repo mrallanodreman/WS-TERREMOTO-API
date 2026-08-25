@@ -4,8 +4,6 @@ import base64
 import json
 import logging
 import mimetypes
-import os
-from io import BytesIO
 
 import httpx
 from cryptography.fernet import Fernet
@@ -19,6 +17,7 @@ from app.modules.webhook.schemas import Tenant
 logger = logging.getLogger(__name__)
 
 _SHARED_SALT = b"salt_fijo_para_apis_2024_compartido"
+_MAX_MEDIA_BYTES = 25 * 1024 * 1024
 
 MEDIA_TYPES = {"image", "video", "audio", "document", "sticker", "voice"}
 
@@ -70,6 +69,25 @@ def _guess_extension(mime_type: str, media_type: str) -> str:
     return fallback.get(media_type, ".bin")
 
 
+def _resolve_media(media_id: str, token: str) -> tuple[str, str] | None:
+    """Resuelve un media ID de WhatsApp a su URL temporal oficial."""
+    try:
+        resp = httpx.get(
+            f"https://graph.facebook.com/v20.0/{media_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        metadata = resp.json()
+        url = metadata.get("url")
+        if not isinstance(url, str) or not url.startswith("https://"):
+            raise ValueError("Graph media response did not include an HTTPS URL")
+        return url, str(metadata.get("mime_type") or "application/octet-stream")
+    except Exception:
+        logger.exception("Failed to resolve WhatsApp media id %s", media_id)
+        return None
+
+
 def _download_media(url: str, token: str) -> tuple[bytes, str] | None:
     """Download media from WhatsApp lookaside URL using tenant token."""
     try:
@@ -80,6 +98,9 @@ def _download_media(url: str, token: str) -> tuple[bytes, str] | None:
             follow_redirects=True,
         )
         resp.raise_for_status()
+        declared_size = int(resp.headers.get("content-length") or 0)
+        if declared_size > _MAX_MEDIA_BYTES or len(resp.content) > _MAX_MEDIA_BYTES:
+            raise ValueError("WhatsApp media exceeds 25 MiB forwarding limit")
         content_type = resp.headers.get("content-type", "application/octet-stream")
         return resp.content, content_type
     except Exception:
@@ -97,27 +118,26 @@ def _attach_media(body: bytes, token: str) -> list[dict]:
         media_obj = msg.get(msg_type)
         if not isinstance(media_obj, dict):
             continue
-        url = media_obj.get("url") or media_obj.get("link")
         media_id = media_obj.get("id")
-        mime_type = media_obj.get("mime_type", "application/octet-stream")
-        if not url:
-            # Try Graph API media endpoint as fallback
-            if media_id and token:
-                url = f"https://graph.facebook.com/v20.0/{media_id}"
-            else:
-                continue
+        if not media_id or not token:
+            continue
+        resolved = _resolve_media(str(media_id), token)
+        if not resolved:
+            continue
+        url, resolved_mime = resolved
         downloaded = _download_media(url, token)
         if not downloaded:
             continue
         data, content_type = downloaded
-        ext = _guess_extension(content_type or mime_type, msg_type)
+        mime_type = content_type or resolved_mime
+        ext = _guess_extension(mime_type, msg_type)
         filename = f"{msg_type}_{media_id or 'unknown'}{ext}"
         attachments.append(
             {
                 "type": msg_type,
                 "media_id": media_id,
                 "filename": filename,
-                "mime_type": content_type or mime_type,
+                "mime_type": mime_type,
                 "size": len(data),
                 "data": base64.b64encode(data).decode("ascii"),
             }
